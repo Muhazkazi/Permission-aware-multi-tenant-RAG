@@ -1,9 +1,8 @@
 # Permission-Aware Multi-Tenant RAG
 
 This project will become a secure document-assistant API for multiple tenants.
-Phase 4 adds password hashing and database-backed JWT authorization foundations.
-It does not yet include login endpoints, document processing, vector search, or
-LLM integration.
+Phase 6 adds tenant-scoped document metadata endpoints. It does not yet include
+file upload, document processing, vector search, or LLM integration.
 
 ## Prerequisites
 
@@ -40,6 +39,25 @@ Expected response:
 ```
 
 Interactive API documentation is available at `http://127.0.0.1:8000/docs`.
+
+## Authentication endpoints
+
+`POST /auth/login` accepts `tenant_id`, `email`, and `password`, then returns a
+short-lived bearer token for an existing active user. `GET /auth/me` requires
+that bearer token and returns the authenticated user ID, tenant ID, and current
+database-resolved roles.
+
+## Document metadata endpoints
+
+`POST /documents` creates a metadata record owned by the authenticated user.
+`GET /documents` and `GET /documents/{document_id}` return only documents the
+authenticated user owns or can read through an existing role-based permission.
+Responses never expose storage keys or file contents.
+
+The current schema supports role-based document read grants, but it does not
+define which role may administer permissions. This phase therefore intentionally
+does not expose a permission grant or revoke endpoint rather than assuming that
+an arbitrary role, including document ownership, can grant access.
 
 ## Docker
 

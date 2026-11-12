@@ -4,6 +4,7 @@ from sqlalchemy import and_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.core.passwords import verify_password
 from app.core.principal import AuthenticatedPrincipal
 from app.core.tokens import AccessTokenClaims
 from app.db.models import Role, Tenant, User, UserRole
@@ -11,6 +12,36 @@ from app.db.models import Role, Tenant, User, UserRole
 
 class PrincipalResolutionError(ValueError):
     """Raised when a verified token cannot resolve to an authorized principal."""
+
+
+class AuthenticationError(ValueError):
+    """Raised when tenant-scoped credentials cannot authenticate a user."""
+
+
+def authenticate_user(
+    session: Session, *, tenant_id: str, email: str, password: str
+) -> User:
+    """Verify credentials against an active user without exposing failure details."""
+
+    try:
+        user = session.scalar(
+            select(User).where(
+                User.tenant_id == tenant_id,
+                User.email == email,
+                User.is_active.is_(True),
+            )
+        )
+    except SQLAlchemyError as error:
+        raise AuthenticationError("Invalid credentials.") from error
+
+    if (
+        user is None
+        or not user.is_active
+        or user.tenant_id != tenant_id
+        or not verify_password(password, user.password_hash)
+    ):
+        raise AuthenticationError("Invalid credentials.")
+    return user
 
 
 def resolve_authenticated_principal(
