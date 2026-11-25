@@ -19,11 +19,14 @@ from app.services.auth_service import (
 )
 
 bearer_scheme = HTTPBearer(auto_error=False)
-UNAUTHENTICATED = HTTPException(
-    status_code=status.HTTP_401_UNAUTHORIZED,
-    detail="Could not validate credentials.",
-    headers={"WWW-Authenticate": "Bearer"},
-)
+
+
+def _unauthenticated() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials.",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
 
 def get_current_principal(
@@ -33,13 +36,13 @@ def get_current_principal(
     """Return the principal derived from a verified token and database state."""
 
     if credentials is None or credentials.scheme.lower() != "bearer":
-        raise UNAUTHENTICATED
+        raise _unauthenticated()
 
     try:
         claims = verify_access_token(credentials.credentials)
         return resolve_authenticated_principal(session, claims)
     except (TokenConfigurationError, TokenValidationError, PrincipalResolutionError):
-        raise UNAUTHENTICATED from None
+        raise _unauthenticated() from None
 
 
 def get_current_tenant_principal(

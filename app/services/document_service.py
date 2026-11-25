@@ -3,7 +3,7 @@
 from uuid import uuid4
 
 from sqlalchemy import exists, or_, select
-from sqlalchemy.exc import IntegrityError, SQLAlchemyError
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.core.principal import AuthenticatedPrincipal
@@ -12,10 +12,6 @@ from app.db.models import Document, DocumentPermission
 
 class DocumentServiceError(RuntimeError):
     """Raised when a document operation cannot complete safely."""
-
-
-class DocumentConflictError(DocumentServiceError):
-    """Raised when a document metadata insert violates a database constraint."""
 
 
 class DocumentNotFoundError(DocumentServiceError):
@@ -29,7 +25,7 @@ def create_document_metadata(
     name: str,
     content_type: str | None,
 ) -> Document:
-    """Create metadata owned by the current user without creating file storage."""
+    """Stage metadata in the caller's transaction and load database defaults."""
 
     _validate_principal_scope(principal)
     document = Document(
@@ -39,16 +35,9 @@ def create_document_metadata(
         content_type=content_type,
         storage_key=f"pending/{uuid4()}",
     )
-    try:
-        session.add(document)
-        session.commit()
-        session.refresh(document)
-    except IntegrityError as error:
-        session.rollback()
-        raise DocumentConflictError("Unable to create document metadata.") from error
-    except SQLAlchemyError as error:
-        session.rollback()
-        raise DocumentServiceError("Unable to create document metadata.") from error
+    session.add(document)
+    session.flush()
+    session.refresh(document)
     return document
 
 

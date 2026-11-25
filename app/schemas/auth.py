@@ -1,6 +1,6 @@
 """Schemas for the minimal authentication API."""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SecretStr
 
 
 class LoginRequest(BaseModel):
@@ -8,7 +8,7 @@ class LoginRequest(BaseModel):
 
     tenant_id: str = Field(min_length=1, max_length=36)
     email: str = Field(min_length=3, max_length=320)
-    password: str = Field(min_length=1, max_length=1024)
+    password: SecretStr = Field(min_length=1, max_length=1024)
 
 
 class TokenResponse(BaseModel):

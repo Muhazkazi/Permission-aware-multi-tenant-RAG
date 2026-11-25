@@ -3,6 +3,8 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import ValidationError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_tenant_principal
@@ -11,7 +13,6 @@ from app.db.models import Document
 from app.db.session import get_db_session
 from app.schemas.documents import CreateDocumentRequest, DocumentResponse
 from app.services.document_service import (
-    DocumentConflictError,
     DocumentNotFoundError,
     DocumentServiceError,
     create_document_metadata,
@@ -20,10 +21,6 @@ from app.services.document_service import (
 )
 
 router = APIRouter(prefix="/documents", tags=["documents"])
-DOCUMENT_NOT_FOUND = HTTPException(
-    status_code=status.HTTP_404_NOT_FOUND,
-    detail="Document not found.",
-)
 
 
 @router.post("", response_model=DocumentResponse, status_code=status.HTTP_201_CREATED)
@@ -41,17 +38,21 @@ def create_document(
             name=request.name,
             content_type=request.content_type,
         )
-    except DocumentConflictError:
+        response = _document_response(document)
+        session.commit()
+    except IntegrityError:
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Could not create document.",
         ) from None
-    except DocumentServiceError:
+    except (DocumentServiceError, SQLAlchemyError, ValidationError):
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Could not process document request.",
         ) from None
-    return _document_response(document)
+    return response
 
 
 @router.get("", response_model=list[DocumentResponse])
@@ -82,7 +83,10 @@ def get_document(
     try:
         document = get_accessible_document(session, principal, document_id)
     except DocumentNotFoundError:
-        raise DOCUMENT_NOT_FOUND from None
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Document not found.",
+        ) from None
     except DocumentServiceError:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

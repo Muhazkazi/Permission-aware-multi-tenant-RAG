@@ -47,12 +47,19 @@ short-lived bearer token for an existing active user. `GET /auth/me` requires
 that bearer token and returns the authenticated user ID, tenant ID, and current
 database-resolved roles.
 
+Validation errors return field locations and static messages without submitted
+values. Login performs an Argon2 check for unknown and disabled accounts. Timing
+can still vary, and the API currently has no login rate limiting.
+
 ## Document metadata endpoints
 
 `POST /documents` creates a metadata record owned by the authenticated user.
 `GET /documents` and `GET /documents/{document_id}` return only documents the
 authenticated user owns or can read through an existing role-based permission.
-Responses never expose storage keys or file contents.
+Responses never expose storage keys or file contents. Creation prepares response
+fields before commit. A lost commit acknowledgement or HTTP response can still
+leave the caller uncertain whether creation succeeded. Repeating a POST can
+create another metadata record.
 
 The current schema supports role-based document read grants, but it does not
 define which role may administer permissions. This phase therefore intentionally

@@ -1,13 +1,17 @@
 """Database-backed authentication helpers."""
 
+from secrets import token_urlsafe
+
 from sqlalchemy import and_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.core.passwords import verify_password
+from app.core.passwords import hash_password, verify_password
 from app.core.principal import AuthenticatedPrincipal
 from app.core.tokens import AccessTokenClaims
 from app.db.models import Role, Tenant, User, UserRole
+
+_DUMMY_PASSWORD_HASH = hash_password(token_urlsafe(32))
 
 
 class PrincipalResolutionError(ValueError):
@@ -34,12 +38,10 @@ def authenticate_user(
     except SQLAlchemyError as error:
         raise AuthenticationError("Invalid credentials.") from error
 
-    if (
-        user is None
-        or not user.is_active
-        or user.tenant_id != tenant_id
-        or not verify_password(password, user.password_hash)
-    ):
+    if user is None or not user.is_active or user.tenant_id != tenant_id:
+        verify_password(password, _DUMMY_PASSWORD_HASH)
+        raise AuthenticationError("Invalid credentials.")
+    if not verify_password(password, user.password_hash):
         raise AuthenticationError("Invalid credentials.")
     return user
 

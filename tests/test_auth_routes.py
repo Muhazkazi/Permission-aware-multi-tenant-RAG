@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import Iterator
+from unittest.mock import Mock
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app.api import deps
@@ -18,6 +20,8 @@ from app.core.tokens import create_access_token
 from app.db.models import Role, Tenant, User
 from app.db.session import get_db_session
 from app.main import app
+from app.schemas.auth import LoginRequest
+from app.services import auth_service
 
 TEST_SECRET = "phase-five-test-secret-that-is-longer-than-thirty-two-characters"
 
@@ -211,3 +215,79 @@ def test_identity_roles_are_not_taken_from_token_content(
 
     assert response.status_code == 200
     assert response.json()["roles"] == ["reader"]
+
+
+@pytest.mark.parametrize(
+    "case", ["too_long", "missing_email", "wrong_type", "bad_json"]
+)
+def test_validation_omits_credentials_from_response_and_logs(case, caplog):
+    client = _client_with_login_session(None)
+    marker = "private-validation-marker"
+    password = marker * 50 if case == "too_long" else marker
+    payload = {
+        "email": "private@example.test",
+        "tenant_id": "tenant-1",
+        "password": password,
+    }
+    caplog.set_level("DEBUG")
+    if case == "bad_json":
+        response = client.post(
+            "/auth/login",
+            content='{"password":"' + password + '"',
+            headers={"Content-Type": "application/json"},
+        )
+    else:
+        if case == "missing_email":
+            del payload["email"]
+        if case == "wrong_type":
+            payload["password"] = {"secret": password}
+        response = client.post("/auth/login", json=payload)
+
+    assert response.status_code == 422
+    assert marker not in response.text and marker not in caplog.text
+    assert "private@example.test" not in response.text
+    assert all(
+        set(detail) == {"loc", "msg", "type"} for detail in response.json()["detail"]
+    )
+    if case == "missing_email":
+        assert response.json()["detail"][0]["loc"] == ["body", "email"]
+
+
+@pytest.mark.parametrize("disabled", [False, True], ids=["unknown", "disabled"])
+def test_ineligible_login_verifies_dummy_hash_and_always_denies(disabled, monkeypatch):
+    user = _active_user() if disabled else None
+    if user is not None:
+        user.is_active = False
+    verify = Mock(return_value=True)
+    monkeypatch.setattr(auth_service, "verify_password", verify)
+    response = _client_with_login_session(user).post(
+        "/auth/login",
+        json={
+            "tenant_id": "tenant-1",
+            "email": "reader@example.test",
+            "password": "attempt",
+        },
+    )
+    assert auth_service._DUMMY_PASSWORD_HASH.startswith("$argon2")
+    verify.assert_called_once_with("attempt", auth_service._DUMMY_PASSWORD_HASH)
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Invalid credentials."}
+
+
+@pytest.mark.parametrize("failure", ["login", "bearer"])
+def test_repeated_authentication_failures_have_fresh_exceptions(failure):
+    credentials = LoginRequest(
+        tenant_id="tenant-1", email="reader@example.test", password="attempt"
+    )
+    errors = []
+    for _ in range(2):
+        with pytest.raises(HTTPException) as caught:
+            if failure == "login":
+                auth_routes.login(credentials, _LoginSessionDouble(None))
+            else:
+                deps.get_current_principal(None, None)
+        errors.append(caught.value)
+    assert errors[0] is not errors[1]
+    for error in errors:
+        assert error.status_code == 401
+        assert error.headers == {"WWW-Authenticate": "Bearer"}

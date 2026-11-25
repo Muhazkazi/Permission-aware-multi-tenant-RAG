@@ -14,11 +14,6 @@ from app.schemas.auth import IdentityResponse, LoginRequest, TokenResponse
 from app.services.auth_service import AuthenticationError, authenticate_user
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
-INVALID_CREDENTIALS = HTTPException(
-    status_code=status.HTTP_401_UNAUTHORIZED,
-    detail="Invalid credentials.",
-    headers={"WWW-Authenticate": "Bearer"},
-)
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -33,11 +28,15 @@ def login(
             session,
             tenant_id=credentials.tenant_id,
             email=credentials.email,
-            password=credentials.password,
+            password=credentials.password.get_secret_value(),
         )
         access_token = create_access_token(user_id=user.id, tenant_id=user.tenant_id)
     except (AuthenticationError, TokenConfigurationError):
-        raise INVALID_CREDENTIALS from None
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials.",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from None
 
     return TokenResponse(
         access_token=access_token,

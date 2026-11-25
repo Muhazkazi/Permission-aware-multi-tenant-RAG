@@ -5,18 +5,22 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, event, select
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import app.db.models  # noqa: F401
 from app.api.deps import get_current_tenant_principal
+from app.api.routes import documents as document_routes
 from app.core.principal import AuthenticatedPrincipal
 from app.db.base import Base
 from app.db.models import Document, DocumentPermission, Role, Tenant, User
 from app.db.session import get_db_session
 from app.main import app
+from app.schemas.documents import DocumentResponse
 from app.services.document_service import (
     DocumentNotFoundError,
     create_document_metadata,
@@ -271,3 +275,84 @@ def test_document_routes_return_safe_metadata_and_validate_input(
     assert [document["name"] for document in list_response.json()] == ["Product brief"]
     assert denied_response.status_code == 404
     assert denied_response.json() == {"detail": "Document not found."}
+
+
+@pytest.fixture
+def creator(document_session):
+    tenant = Tenant(id="tenant-1", name="Tenant One")
+    user = User(
+        id="user-1",
+        tenant_id=tenant.id,
+        email="user@example.test",
+        password_hash="unused",
+        is_active=True,
+    )
+    document_session.add_all([tenant, user])
+    document_session.commit()
+    principal = _principal(user, tenant)
+    app.dependency_overrides[get_current_tenant_principal] = lambda: principal
+    app.dependency_overrides[get_db_session] = lambda: document_session
+    return principal
+
+
+def test_repeated_missing_document_raises_fresh_404(document_session, creator):
+    errors = []
+    for _ in range(2):
+        with pytest.raises(HTTPException) as caught:
+            document_routes.get_document("missing", creator, document_session)
+        assert caught.value.status_code == 404
+        assert caught.value.detail == "Document not found."
+        errors.append(caught.value)
+    assert errors[0] is not errors[1]
+
+
+@pytest.mark.parametrize(
+    ("stage", "status"),
+    [("flush", 409), ("refresh", 500), ("response", 500), ("commit", 500)],
+)
+def test_failed_creation_rolls_back(
+    document_session, creator, monkeypatch, stage, status
+):
+    def fail(*_args, **_kwargs):
+        if stage == "flush":
+            raise IntegrityError("internal detail", None, ValueError())
+        if stage == "response":
+            return DocumentResponse.model_validate({})
+        raise SQLAlchemyError("internal detail")
+
+    with monkeypatch.context() as patch:
+        if stage == "response":
+            patch.setattr(document_routes, "_document_response", fail)
+        else:
+            patch.setattr(document_session, stage, fail)
+        response = TestClient(app).post("/documents", json={"name": "Rollback test"})
+    assert response.status_code == status
+    assert "internal detail" not in response.text
+    assert not document_session.in_transaction()
+    assert document_session.scalar(select(Document.id)) is None
+
+
+def test_creation_returns_prepared_response_without_post_commit_sql(
+    document_session, creator
+):
+    document_session.expire_on_commit = True
+    committed = False
+
+    @event.listens_for(document_session, "after_commit")
+    def mark_commit(_session):
+        nonlocal committed
+        committed = True
+
+    @event.listens_for(document_session.get_bind(), "before_cursor_execute")
+    def check_sql(*_args):
+        assert not committed, "Unexpected SQL after commit"
+
+    try:
+        response = TestClient(app).post("/documents", json={"name": "Prepared"})
+        assert committed
+        assert response.status_code == 201
+        assert response.json()["created_at"]
+        assert response.json()["name"] == "Prepared"
+    finally:
+        event.remove(document_session.get_bind(), "before_cursor_execute", check_sql)
+        event.remove(document_session, "after_commit", mark_commit)
