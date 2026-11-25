@@ -4,6 +4,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.db.models import Document
+
 
 class CreateDocumentRequest(BaseModel):
     """Safe metadata for a document record without file content or storage paths."""
@@ -24,3 +26,13 @@ class DocumentResponse(BaseModel):
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+    @classmethod
+    def from_document(cls, document: Document) -> "DocumentResponse":
+        return cls(
+            document_id=document.id,
+            name=document.name,
+            content_type=document.content_type,
+            created_at=document.created_at,
+            updated_at=document.updated_at,
+        )

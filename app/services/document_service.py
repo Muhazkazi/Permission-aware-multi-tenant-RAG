@@ -24,6 +24,7 @@ def create_document_metadata(
     *,
     name: str,
     content_type: str | None,
+    storage_key: str | None = None,
 ) -> Document:
     """Stage metadata in the caller's transaction and load database defaults."""
 
@@ -33,7 +34,7 @@ def create_document_metadata(
         owner_user_id=principal.user.id,
         name=name,
         content_type=content_type,
-        storage_key=f"pending/{uuid4()}",
+        storage_key=storage_key or f"pending/{uuid4()}",
     )
     session.add(document)
     session.flush()

@@ -98,10 +98,4 @@ def get_document(
 def _document_response(document: Document) -> DocumentResponse:
     """Map a model to the explicit, safe document response shape."""
 
-    return DocumentResponse(
-        document_id=document.id,
-        name=document.name,
-        content_type=document.content_type,
-        created_at=document.created_at,
-        updated_at=document.updated_at,
-    )
+    return DocumentResponse.from_document(document)

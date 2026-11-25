@@ -14,6 +14,7 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    Text,
     UniqueConstraint,
     func,
 )
@@ -61,6 +62,7 @@ class DocumentChunk(Base):
     document_id: Mapped[str] = mapped_column(String(36), nullable=False)
     chunk_index: Mapped[int] = mapped_column(Integer(), nullable=False)
     qdrant_point_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    chunk_text: Mapped[str | None] = mapped_column(Text(), nullable=True)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     token_count: Mapped[int] = mapped_column(Integer(), nullable=False)
     created_at: Mapped[datetime] = mapped_column(

@@ -1,9 +1,12 @@
 """Environment-based application settings."""
 
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.services.chunking import validate_windows
 
 SUPPORTED_JWT_ALGORITHMS = frozenset({"HS256", "HS384", "HS512"})
 MINIMUM_JWT_SECRET_LENGTH = 32
@@ -15,6 +18,11 @@ class Settings(BaseSettings):
     app_name: str = "Permission-Aware Multi-Tenant RAG API"
     app_env: str = "development"
     app_version: str = "0.1.0"
+    upload_dir: Path = Path.home() / ".permission-aware-rag" / "uploads"
+    max_upload_bytes: int = Field(default=5 * 1024 * 1024, ge=1, le=32 * 1024 * 1024)
+    chunk_size: int = Field(default=1000, ge=1, le=8192)
+    chunk_overlap: int = Field(default=100, ge=0)
+
     database_url: str | None = None
     jwt_secret_key: SecretStr | None = None
     jwt_algorithm: str = "HS256"
@@ -25,6 +33,13 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
     )
+
+    @model_validator(mode="after")
+    def validate_upload_settings(self) -> "Settings":
+        if not self.upload_dir.is_absolute():
+            raise ValueError("UPLOAD_DIR must be an absolute private directory.")
+        validate_windows(self.chunk_size, self.chunk_overlap)
+        return self
 
     @model_validator(mode="after")
     def validate_production_jwt_settings(self) -> "Settings":

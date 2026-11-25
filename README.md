@@ -1,8 +1,8 @@
 # Permission-Aware Multi-Tenant RAG
 
 This project will become a secure document-assistant API for multiple tenants.
-Phase 6 adds tenant-scoped document metadata endpoints. It does not yet include
-file upload, document processing, vector search, or LLM integration.
+Phase 7 adds authenticated TXT and PDF upload, private storage, text extraction,
+and deterministic tenant-scoped chunks.
 
 ## Prerequisites
 
@@ -66,6 +66,155 @@ define which role may administer permissions. This phase therefore intentionally
 does not expose a permission grant or revoke endpoint rather than assuming that
 an arbitrary role, including document ownership, can grant access.
 
+## Upload and chunking
+
+`POST /documents/upload` takes a bearer token, an `X-Filename` header containing
+a base filename (up to 255 characters), and the original file bytes as the HTTP
+body. Use `Content-Type: text/plain` for a UTF-8 `.txt` file or
+`Content-Type: application/pdf` for a `.pdf` file. This endpoint uses a raw
+binary body so it can authenticate before reading the file and enforce its limit
+as bytes arrive, including requests without Content-Length.
+
+PowerShell example using an existing token and a local file of your choice:
+
+```powershell
+$file = Get-Item -LiteralPath (Read-Host "Path to your TXT file")
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/documents/upload `
+  -Headers @{ Authorization = "Bearer $token"; "X-Filename" = $file.Name } `
+  -ContentType "text/plain" -InFile $file.FullName
+```
+
+A successful request returns 201 and the same public metadata fields as document
+creation. Tenant and owner come from the authenticated principal. Chunks share
+the document's current access rules through their same-tenant foreign key.
+Original files, storage identifiers, paths and chunk bodies are private.
+
+| Environment variable | Default | Meaning |
+|---|---|---|
+| `MAX_UPLOAD_BYTES` | 5242880 | Maximum raw file size, configurable up to 32 MiB |
+| `UPLOAD_DIR` | `~/.permission-aware-rag/uploads` | Local private storage. Supply an absolute path on the host. Compose mounts the dedicated `document_uploads` volume at `/var/lib/rag/uploads`. |
+| `CHUNK_SIZE` | 1000 | Window size in Unicode characters, from 1 through 8192 |
+| `CHUNK_OVERLAP` | 100 | Characters shared by adjacent windows, at most 75% of the window size |
+
+TXT decoding accepts a UTF-8 BOM and rejects binary control characters. Both
+formats must yield at least one letter or digit. PDF extraction uses a strict
+pypdf reader in a separate process, with a 15-second timeout, a 200-page limit,
+and a 384 MiB address-space ceiling on Linux. Encrypted and image-only PDFs are
+rejected. Extraction follows the PDF text layer's order and joins pages with a
+newline. OCR and visual layout reconstruction are outside this phase.
+
+Extracted text is limited to one million characters. Chunk windows advance by
+size minus overlap and stop once a window reaches the end. Whitespace-only
+windows are skipped. Before allocation, at most 4096 windows and an 8 MiB upper bound on generated UTF-8 bytes are allowed. The estimate charges four bytes per character, including overlap. Each new
+chunk stores its ordered index, text, SHA-256 of its UTF-8 bytes, and the count
+of whitespace-delimited tokens. The existing required point-ID field reserves
+a UUID for future use. Processing runs entirely in the API and PDF subprocess.
+
+| HTTP status | Meaning |
+|---|---|
+| 401 | Authentication failed |
+| 408 / 413 | Body took over 60 seconds or exceeded the byte limit |
+| 415 | Unsupported extension or mismatched media type |
+| 422 | Invalid filename, unusable text, malformed/encrypted PDF, or extraction/chunk limit exceeded |
+| 500 | Processing or persistence failed |
+| 503 | Both upload slots in this API worker are busy |
+
+**Persistence and retries.** Each successful POST creates a separate document,
+including repeated bytes or filenames. The storage service creates an exclusive
+opaque file in a tenant-specific directory, flushes it to disk, then commits the
+document and all chunks together. Extraction failures create no file. Ordinary
+write failures roll back and remove the new file. On a commit error the service
+checks the primary database before deleting the file. If the outcome cannot be
+verified, the file is retained. A crash, power loss or cleanup failure can require
+manual reconciliation. Compare private files with committed storage keys while
+uploads are stopped before removing anything. A client that loses the response
+should check its document list before retrying.
+
+Restrict the storage directory, database and backups to the service account and
+authorized operators. On Windows configure filesystem ACLs on the private
+directory. Chunk text and originals are stored as plaintext at the application
+layer. The PDF worker is resource-bounded, not an OS security sandbox; the
+Linux memory cap does not apply on Windows. Per-tenant storage quotas and
+malware scanning are outside this phase.
+
+## Pre-deployment checks and capacity planning
+
+Run `.\scripts\verify-image.ps1` from PowerShell with Docker Desktop in Linux
+container mode. This builds from scratch under a generated tag, runs the
+installed wheel outside the source tree with no network, no credentials or
+volume mounts, a read-only root filesystem and temporary scratch space, then
+removes the verification image. It checks dependencies, route registration,
+Alembic revision discovery, actual PDF extraction and Linux storage safeguards.
+The procedure uses the project's dependency ranges; repeat builds can resolve
+different package versions.
+
+**Storage boundary.** Provision the upload root on a dedicated private filesystem
+or volume. On Linux the service requires its own UID and no group/other access
+on the root and tenant directories (normally 0700). It traverses from the
+filesystem root using no-follow directory descriptors; creation and unlink use
+the same pinned tenant directory. Ancestors must belong to root or the service
+UID and must not be group/world writable except for sticky directories. An
+existing unsafe root is rejected rather than silently chmodded. Inspect a
+pre-existing volume's ownership and permissions before enabling uploads.
+On Windows the service checks existing components for reparse points including
+junctions. An administrator must apply restrictive ACLs to the root and prevent
+other principals from replacing ancestors. The application does not inspect
+DACLs or pin Windows directory handles against concurrent replacements.
+Use a local service-owned drive. POSIX modes do not establish Windows ACLs.
+
+Upload diagnostics use JSON records under the Uvicorn error logger with
+server-generated correlation ID, stage, outcome and optional HTTP status.
+Use these IDs to correlate rejection, database, rollback, reconciliation and
+cleanup events. Treat failed reconciliation or cleanup as a reason to compare
+storage and committed database keys before removing any file.
+
+### Restricted PDF worker design (pending)
+
+The current PDF subprocess shares the API's filesystem privileges. Before accepting
+untrusted tenants, split parsing into a dedicated image containing only the
+parser and a small supervisor. Implement a length-prefixed protocol over a Unix
+domain socket in a dedicated IPC volume shared with the API. Give only the API
+and supervisor access to the socket. Use network_mode: none and pass no database
+URL, JWT secret, original-files mount, API source tree or Docker socket.
+Run under a dedicated non-root UID with dropped capabilities, no-new-privileges,
+a read-only root filesystem and bounded tmpfs. Start validation with one parser
+at a time, one CPU, 512 MiB container memory and 16 PIDs; load-test these limits.
+The supervisor should close listening descriptors in each parser, preserve the
+200-page and 15-second limits, and reap the parser process group on timeout or
+disconnect. Bound request bytes on both peers and bound response bytes before
+allocation (4 MB for one million Unicode characters). Return UTF-8 text or a
+fixed error code. The API must validate length, encoding and character limits
+again before persistence. Test missing workers, truncated frames, resource
+limits and stale sockets offline; fail closed with no local-parser fallback.
+
+### Shared admission and quota design (pending)
+
+The two upload slots protect one API process. For replica-wide limits, first
+define a charge in bytes for originals plus the UTF-8 bytes of every persisted
+chunk, including overlap. Physical InnoDB and index overhead require separate
+monitoring. Introduce MySQL global and tenant counters plus durable reservations
+keyed by random operation ID, with a lease generation, expiry and state.
+
+1. Before reading the body, atomically reserve one global slot, one tenant slot
+   and a conservative byte budget in a short transaction. Lock global then
+   tenant counters consistently, check limits under lock, and reject on failure.
+   Allocate counter rows on demand. Give reservation updates unique operation
+   IDs so retries cannot double-charge.
+2. Stream within the reservation. Heartbeat during processing. At final commit
+   lock and verify the reservation generation and expiry, convert reserved bytes
+   to actual usage, release slots and commit document and chunks together.
+3. Release a confirmed failed reservation once. Fence expired workers before
+   reclaiming slots. Keep uncertain storage charged until a reconciler checks
+   the authoritative primary and the private file; lost acknowledgements,
+   retries and cleanup failures must converge without double refunds. Include
+   existing originals/chunks in usage before enabling enforcement.
+4. Measure filesystem free bytes/inodes, MySQL tablespace and binlog growth,
+   free database disk, reservation age, rejected admissions and cleanup failures.
+   Set warning/critical thresholds and projected time-to-full alerts for each
+   backing device. Reserve headroom and stop admission before critical capacity.
+   Validate concurrent reservations, worker death, failover, partial storage
+   cleanup and reconciliation against disposable MySQL before rollout.
+
 ## Docker
 
 ```powershell
@@ -74,10 +223,23 @@ Copy-Item .env.example .env
 docker compose up --build
 ```
 
-Apply the empty baseline migration after MySQL is healthy:
+Apply the migration manually after MySQL is healthy:
 
 ```powershell
-docker compose exec api alembic upgrade head
+docker compose exec api alembic upgrade 20261125_0003
+```
+
+For an existing Phase 6 deployment with healthy MySQL, use the following sequence
+when ready to deploy. Building first makes the new migration available to the
+one-off container. Revision `20261125_0003` adds nullable `document_chunks.chunk_text`
+after `20261013_0002`, preserving legacy rows. Successful synchronous uploads
+write text on every new chunk. There is no processing-status column or startup
+migration. Downgrading this revision drops stored chunk text.
+
+```powershell
+docker compose build api
+docker compose run --rm --no-deps api alembic upgrade 20261125_0003
+docker compose up -d --no-deps --no-build --force-recreate api
 ```
 
 ## Tests and linting
