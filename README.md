@@ -72,48 +72,52 @@ default output. A leak or failed positive control gives a nonzero exit code.
 
 ### Dedicated Docker Compose staging
 
-Prepare a separate `.env.demo` from `.env.example` with new URL-safe MySQL
-passwords and a random JWT secret. Set the following values in that file and
-use a shell free of conflicting Compose environment overrides.
-
-```dotenv
-APP_ENV=staging
-MYSQL_DATABASE=rag_demo
-QDRANT_COLLECTION_NAME=rag_demo_chunks
-QDRANT_URL=http://qdrant:6333
-EMBEDDING_PROVIDER=local
-LLM_PROVIDER=local
-CHUNK_SIZE=160
-CHUNK_OVERLAP=24
-API_HOST_BIND=127.0.0.1
-API_HOST_PORT=18000
-MYSQL_HOST_PORT=13307
-QDRANT_HOST_PORT=16333
-```
-
-Use a dedicated Compose project so each service gets its own project-scoped
-volume. The one-command startup after configuration is
-`docker compose --env-file .env.demo -p rag-demo up -d --build --wait`.
-For this new staging database, apply the existing migration explicitly and run
-the opt-in tools inside the staging API container:
+From the checkout, with Docker Desktop running Linux containers, run:
 
 ```powershell
-$demo = @('compose', '--env-file', '.env.demo', '-p', 'rag-demo')
-docker @demo exec api alembic upgrade 20261125_0003
-# Supply a persistent, randomly generated demo-only secret from your secret manager.
-$env:DEMO_PASSWORD_KEY = [System.Net.NetworkCredential]::new('', (Read-Host 'Demo key (32+ characters)' -AsSecureString)).Password
-docker @demo exec -e DEMO_PASSWORD_KEY api python -m scripts.seed_demo --staging-url http://127.0.0.1:8000
-docker @demo exec -e DEMO_PASSWORD_KEY api python -m scripts.run_benchmarks --staging-url http://127.0.0.1:8000
-Remove-Item Env:DEMO_PASSWORD_KEY
+.\scripts\start-demo.ps1 -SwitchApi
 ```
 
-The key derives distinct persona passwords. Reuse it on subsequent runs.
-Seeding reuses existing identities, verifies document ownership and chunk text,
-and reapplies the corpus grants. Staging evaluation uses the already seeded
-corpus, writes normal retrieval audits, and temporarily revokes and restores
-the HR salary grant in each tenant. The tools serialize these operations with
-a MySQL advisory lock. If interrupted during revocation, rerun the seed command
-to restore the corpus. Seeding and migrations are explicit operator actions.
+The runner builds a separate Compose project named `rag-demo`, waits for MySQL,
+migrates `rag_demo` to the current Alembic head and seeds `rag_demo_chunks`
+through the real upload API. All Python commands run inside the demo API image.
+It creates an ignored `.env.demo.local` on first use with separate random MySQL,
+JWT and demo secrets. Keep this file for subsequent starts. Re-running verifies
+existing documents and reapplies the demo grants.
+
+Open [Swagger UI](http://127.0.0.1:8000/docs). The terminal prints one login JSON
+object and a short-lived bearer token for each persona. Paste an object into
+`POST /auth/login` to get a fresh token. In **Authorize**, paste the token value
+without the `Bearer ` prefix. Try `POST /rag/query` with
+`{"query":"What is the salary band?"}` as Acme HR and then as Acme employee.
+
+The demo API binds to loopback port 8000. `-SwitchApi` allows the runner to
+pause an API from this checkout already using that port. It leaves the primary
+MySQL and Qdrant services running. The demo has its own volumes, uses
+`mysql:3306` and `qdrant:6333` internally, and publishes their host loopback
+ports at 13307 and 16333. Host-side database URL edits are unnecessary.
+
+```powershell
+.\scripts\start-demo.ps1 -Stop
+# If you switched away from the original API, restore its existing container.
+docker compose start api
+```
+
+To run the full benchmark against the running demo from PowerShell:
+
+```powershell
+$key = (Select-String -LiteralPath .env.demo.local -Pattern '^DEMO_PASSWORD_KEY=(.+)$').Matches[0].Groups[1].Value
+try {
+    $env:DEMO_PASSWORD_KEY = $key
+    docker compose -f docker-compose.yml --env-file .env.demo.local -p rag-demo exec -T -e DEMO_PASSWORD_KEY api python -m scripts.run_benchmarks --staging-url http://127.0.0.1:8000
+} finally {
+    Remove-Item Env:DEMO_PASSWORD_KEY
+    Remove-Variable key
+}
+```
+
+The benchmark writes retrieval audits and temporarily revokes and restores
+each HR salary grant. A MySQL advisory lock serializes corpus tools.
 
 ## Limitations & Production Roadmap
 
@@ -138,7 +142,7 @@ py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
 pip install -e ".[dev]"
-Copy-Item .env.example .env
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 # Edit .env and replace the MySQL password placeholders and JWT secret.
 # Generate a secret, for example: python -c "import secrets; print(secrets.token_urlsafe(32))"
 uvicorn app.main:app --reload
@@ -413,7 +417,7 @@ keyed by random operation ID, with a lease generation, expiry and state.
 ## Docker
 
 ```powershell
-Copy-Item .env.example .env
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 # Edit .env and replace the MySQL password placeholders and JWT secret.
 docker compose up --build
 ```

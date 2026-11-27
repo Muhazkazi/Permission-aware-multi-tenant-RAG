@@ -2,6 +2,7 @@
 
 import argparse
 import hmac
+import json
 from dataclasses import dataclass, field
 from uuid import NAMESPACE_URL, uuid5
 
@@ -221,7 +222,13 @@ def prepare(rt: Runtime, *, seed: bool) -> Corpus:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--staging-url", help="Explicit dedicated staging API URL")
+    parser.add_argument(
+        "--show-logins", action="store_true",
+        help="Print the six staging login payloads and their current bearer tokens.",
+    )
     args = parser.parse_args()
+    if args.show_logins and not args.staging_url:
+        parser.error("--show-logins requires --staging-url")
     with runtime(args.staging_url) as rt:
         corpus = prepare(rt, seed=True)
         print(
@@ -230,6 +237,11 @@ def main():
         )
         if not args.staging_url:
             print("Local demo uses disposable storage.")
+        if args.show_logins:
+            for (company, persona), token in corpus.tokens.items():
+                print(f"{company}/{persona}")
+                print(json.dumps(credentials(rt, company, persona)))
+                print(f"Bearer {token}")
 
 
 if __name__ == "__main__":
