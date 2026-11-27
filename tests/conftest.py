@@ -5,6 +5,7 @@ from secrets import token_urlsafe
 
 import pytest
 from fastapi.testclient import TestClient
+from qdrant_client import QdrantClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -15,6 +16,8 @@ from app.db.base import Base
 from app.db.models import Tenant, User
 from app.db.session import create_session_factory, get_db_session
 from app.main import app
+from app.services.embeddings import get_embeddings, local_embeddings
+from app.services.vector_store import VectorStore, get_vector_store
 
 
 @pytest.fixture
@@ -37,11 +40,26 @@ def sessions() -> Iterator[sessionmaker[Session]]:
 
 
 @pytest.fixture
-def client(sessions, monkeypatch) -> Iterator[TestClient]:
+def vector_store():
+    client = QdrantClient(":memory:", force_disable_check_same_thread=True)
+    try:
+        yield VectorStore(client, "isolated", 32)
+    finally:
+        client.close()
+
+
+@pytest.fixture
+def client(sessions, monkeypatch, vector_store) -> Iterator[TestClient]:
     def request_session() -> Iterator[Session]:
         with sessions() as session:
             yield session
 
+    monkeypatch.setitem(
+        app.dependency_overrides, get_vector_store, lambda: vector_store
+    )
+    monkeypatch.setitem(
+        app.dependency_overrides, get_embeddings, lambda: local_embeddings(32)
+    )
     monkeypatch.setitem(app.dependency_overrides, get_db_session, request_session)
     monkeypatch.setenv("JWT_SECRET_KEY", token_urlsafe(48))
     monkeypatch.setenv("JWT_ALGORITHM", "HS256")

@@ -18,8 +18,10 @@ from app.core.principal import AuthenticatedPrincipal
 from app.core.upload_events import correlation_id, upload_event
 from app.db.session import get_db_session
 from app.schemas.documents import DocumentResponse
+from app.services.embeddings import Embeddings, get_embeddings
 from app.services.extraction import InvalidDocument
 from app.services.upload import process_upload
+from app.services.vector_store import VectorStore, get_vector_store
 
 
 class UploadRoute(APIRoute):
@@ -81,6 +83,8 @@ async def upload_document(
     principal: Annotated[AuthenticatedPrincipal, Depends(get_current_tenant_principal)],
     session: Annotated[Session, Depends(get_db_session)],
     settings: Annotated[Settings, Depends(get_settings)],
+    store: Annotated[VectorStore, Depends(get_vector_store)],
+    encoder: Annotated[Embeddings, Depends(get_embeddings)],
     x_filename: Annotated[str, Header(min_length=1, max_length=255)],
 ) -> DocumentResponse:
     filename = PureWindowsPath(x_filename)
@@ -118,6 +122,8 @@ async def upload_document(
                 x_filename,
                 media,
                 bytes(data),
+                store,
+                encoder,
             )
         except InvalidDocument:
             raise HTTPException(

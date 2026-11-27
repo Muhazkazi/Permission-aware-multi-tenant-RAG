@@ -4,7 +4,8 @@ WORKDIR /app
 
 COPY pyproject.toml README.md ./
 COPY app ./app
-RUN pip install --no-cache-dir . && pip check
+ARG EMBEDDING_EXTRAS=""
+RUN pip install --no-cache-dir ".${EMBEDDING_EXTRAS}" && pip check
 COPY alembic ./alembic
 COPY alembic.ini ./
 

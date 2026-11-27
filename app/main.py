@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.routes.auth import router as auth_router
 from app.api.routes.documents import router as documents_router
+from app.api.routes.retrieval import router as retrieval_router
 from app.api.routes.upload import router as upload_router
 from app.core.config import get_settings
 
@@ -13,6 +14,7 @@ settings = get_settings()
 
 app = FastAPI(title=settings.app_name, version=settings.app_version)
 app.include_router(auth_router)
+app.include_router(retrieval_router)
 app.include_router(upload_router)
 app.include_router(documents_router)
 

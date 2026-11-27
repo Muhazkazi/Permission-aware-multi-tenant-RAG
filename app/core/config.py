@@ -2,6 +2,7 @@
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -22,6 +23,12 @@ class Settings(BaseSettings):
     max_upload_bytes: int = Field(default=5 * 1024 * 1024, ge=1, le=32 * 1024 * 1024)
     chunk_size: int = Field(default=1000, ge=1, le=8192)
     chunk_overlap: int = Field(default=100, ge=0)
+
+    qdrant_url: str = "http://127.0.0.1:6333"
+    qdrant_collection_name: str = Field(default="rag_chunks_v1", min_length=1)
+    embedding_dimension: int = Field(default=384, ge=1, le=4096)
+    embedding_provider: Literal["local", "sentence-transformers"] = "local"
+    embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
 
     database_url: str | None = None
     jwt_secret_key: SecretStr | None = None

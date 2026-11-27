@@ -15,8 +15,10 @@ from app.db.models import Document, DocumentChunk
 from app.schemas.documents import DocumentResponse
 from app.services.chunking import chunk_text
 from app.services.document_service import create_document_metadata
+from app.services.embeddings import Embeddings
 from app.services.extraction import InvalidDocument, extract_text
 from app.services.private_storage import tenant_directory
+from app.services.vector_store import VectorStore
 
 
 def process_upload(
@@ -26,6 +28,8 @@ def process_upload(
     name: str,
     media_type: str,
     data: bytes,
+    store: VectorStore,
+    encoder: Embeddings,
 ) -> DocumentResponse:
     try:
         text = extract_text(data, media_type)
@@ -45,6 +49,7 @@ def process_upload(
     path = settings.upload_dir / key
     created_file = False
     committing = False
+    indexing = False
     handles = ExitStack()
     stage = "persistence"
     try:
@@ -82,6 +87,10 @@ def process_upload(
             output.write(data)
             output.flush()
             os.fsync(output.fileno())
+        stage = "indexing"
+        document_id = document.id
+        indexing = True
+        store.upsert_document(document, document.chunks, encoder)
         stage = "commit"
         committing = True
         session.commit()
@@ -120,6 +129,13 @@ def process_upload(
                 except OSError:
                     upload_event("cleanup", "failed")
                     raise
+                finally:
+                    if indexing:
+                        try:
+                            store.delete_document(tenant_id, document_id)
+                        except Exception:
+                            upload_event("vector_cleanup", "failed")
+                            raise
         raise
     finally:
         handles.close()

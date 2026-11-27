@@ -137,6 +137,45 @@ layer. The PDF worker is resource-bounded, not an OS security sandbox; the
 Linux memory cap does not apply on Windows. Per-tenant storage quotas and
 malware scanning are outside this phase.
 
+## Vector indexing and search
+
+New uploads synchronously index their chunks in the configured Qdrant collection.
+`POST /retrieval/search` accepts a bearer token and JSON such as
+`{"query":"quarterly forecast","top_k":5}`. The API returns a ranked array
+of up to 20 chunks, with score, text, IDs, index, document name and media type.
+Blank queries and extra body fields return 422. Query parameters cannot set identity.
+
+MySQL authorizes candidate documents on every request. Qdrant requires the tenant
+and an authorized document ID, plus a match on the owner user ID or a current
+member role ID. When an authorized document has newly granted access missing
+from its indexed ACL, the search refreshes its snapshot before ranking. A
+revoked grant is excluded immediately by the SQL-derived candidate list.
+Classification is `restricted` for every document: the schema defines owner
+access and role read grants only. Text and display metadata come from authorized
+SQL records, in vector rank order. The API records the query hash, outcome and
+returned chunk IDs in the existing audit table before releasing results.
+
+Compose binds Qdrant HTTP to loopback port 6333 and persists it in `qdrant_data`.
+Keep the Compose network and direct Qdrant access restricted to trusted services
+and operators; direct database clients bypass the API. Local Python defaults to
+`http://127.0.0.1:6333`, Compose to `http://qdrant:6333`; override with
+`QDRANT_URL`. The default collection is `rag_chunks_v1` and uses 384-dimensional
+cosine vectors. `EMBEDDING_PROVIDER=local` uses reproducible lexical feature
+hashing without model downloads. For semantic embeddings, install `.[semantic]`
+(or set the Compose build argument via `EMBEDDING_EXTRAS=[semantic]`), provision
+model files readable by the API, set `EMBEDDING_PROVIDER=sentence-transformers`,
+`EMBEDDING_MODEL` to the local directory and `EMBEDDING_DIMENSION` to its output
+size. Use a new `QDRANT_COLLECTION_NAME` whenever changing provider or model,
+even when dimensions match. A mismatched collection size or metric fails closed.
+
+Existing uploads require a separately authorized backfill to become searchable.
+No backfill runs at startup. Upload errors trigger SQL rollback and file/vector
+cleanup; uncertain commits retain artifacts for reconciliation. A process crash
+or failed Qdrant delete can leave orphan vectors. Compare registry point IDs with
+Qdrant before cleanup. A search cannot return orphan text. The SQL candidate
+list and snapshot refresh are suited to modest tenant corpora; measure query
+size and latency before supporting large tenants.
+
 ## Pre-deployment checks and capacity planning
 
 Run `.\scripts\verify-image.ps1` from PowerShell with Docker Desktop in Linux
