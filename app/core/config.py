@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     embedding_provider: Literal["local", "sentence-transformers"] = "local"
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
 
+    llm_provider: Literal["local", "openai-compatible"] = "local"
+    llm_base_url: str = ""
+    llm_api_key: SecretStr | None = None
+    llm_model: str = ""
+
     database_url: str | None = None
     jwt_secret_key: SecretStr | None = None
     jwt_algorithm: str = "HS256"

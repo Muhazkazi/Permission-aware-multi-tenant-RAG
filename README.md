@@ -1,8 +1,7 @@
 # Permission-Aware Multi-Tenant RAG
 
-This project will become a secure document-assistant API for multiple tenants.
-Phase 7 adds authenticated TXT and PDF upload, private storage, text extraction,
-and deterministic tenant-scoped chunks.
+This document-assistant API supports private TXT and PDF uploads, tenant-scoped
+search, and grounded answers with citations to authorized documents.
 
 ## Prerequisites
 
@@ -175,6 +174,41 @@ or failed Qdrant delete can leave orphan vectors. Compare registry point IDs wit
 Qdrant before cleanup. A search cannot return orphan text. The SQL candidate
 list and snapshot refresh are suited to modest tenant corpora; measure query
 size and latency before supporting large tenants.
+
+## Grounded answers and retrieval audits
+
+`POST /rag/query` accepts a bearer token and the same JSON body as search,
+for example `{"query":"What is the launch date?","top_k":5}`. The response
+includes the answer, source citations, model identifier, and three timings in
+milliseconds. `retrieval_ms` includes authorization filtering, SQL hydration
+and the audit commit. `generation_ms` includes quote validation. `latency_ms`
+is their sum and excludes HTTP transport and authentication overhead.
+
+`LLM_PROVIDER=local` uses a deterministic sentence selector and requires no
+credentials. For an approved external provider, set `LLM_PROVIDER=openai-compatible`,
+`LLM_BASE_URL` to its API base (including any version prefix), and `LLM_MODEL`
+to the model identifier. Set `LLM_API_KEY` if required. The API sends the
+question and verified chunk content to that destination over HTTPS (HTTP is
+also supported on loopback). Both providers produce extractive answers. Each
+citation must identify a verified chunk containing the exact quoted passage.
+Missing evidence returns a refusal with an empty citation list. Retrieval,
+audit, or provider failures return 503.
+
+`GET /audit/documents/{document_id}?days=30` requires current membership in
+the tenant's `admin` role. The response lists retrieval events newest first.
+Each entry includes the audit UUID as its request ID, timestamp, requesting
+user, action, retrieval outcome, model and chunk IDs for that document. A RAG
+event records context retrieved for the configured model before generation
+begins. Older search entries resolve their chunk IDs using the current registry.
+The time window accepts 1–365 days. Use `limit` (1–500) and `offset` to page
+through results. The query scans the tenant's audit window for document matches.
+
+Trusted database operators can update a role's read grant from the checkout
+with `python -m scripts.change_read_grant grant --tenant TENANT_ID --document DOCUMENT_ID --role ROLE_ID`.
+Use `revoke` for removal. The command commits the tenant-scoped SQL change
+before updating every matching Qdrant point. Repeat the same command if vector
+synchronization fails. Direct SQL edits bypass this sync path. On every new
+request, the SQL allowlist enforces revocations even with stale vector payloads.
 
 ## Pre-deployment checks and capacity planning
 

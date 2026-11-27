@@ -104,6 +104,15 @@ class VectorStore:
             ]
             self.client.upsert(self.collection, points, wait=True)
 
+    def sync_document_acl(self, doc: Document) -> None:
+        self.ensure_collection()
+        self.client.set_payload(
+            self.collection,
+            acl_payload(doc),
+            document_filter(doc.tenant_id, doc.id),
+            wait=True,
+        )
+
     def delete_document(self, tenant_id: str, document_id: str) -> None:
         self.client.delete(
             self.collection, document_filter(tenant_id, document_id), wait=True
