@@ -3,6 +3,129 @@
 This document-assistant API supports private TXT and PDF uploads, tenant-scoped
 search, and grounded answers with citations to authorized documents.
 
+## How a question is answered
+
+```mermaid
+flowchart LR
+    JWT[Verify bearer JWT] --> Roles[Load active user and roles from SQL]
+    Roles --> ACL[SQL document allowlist]
+    ACL --> Q[Qdrant pre-filter by tenant, document and owner or role]
+    Q --> SQL[Hydrate authorized chunk IDs and text from SQL]
+    SQL --> Audit[Commit retrieval audit]
+    Audit -->|commit succeeds| LLM[Generate using verified text]
+    Audit -->|commit fails| Stop[Return 503]
+    LLM --> Answer[Validate quotes and citations]
+```
+
+## Benchmark & Security Results
+
+The local evaluation uses two fictional tenants, six authenticated personas,
+six TXT uploads and eight indexed chunks. The employee can read the policy and
+runbook, HR can read the policy and salary sheet, and the admin can read all
+three through ownership or grants. Each salary sheet spans two chunks. One
+complete run on Windows produced these results.
+
+| Metric | Verified local result |
+|---|---:|
+| Adversarial requests across search and RAG | 100 |
+| Responses containing a forbidden document ID, chunk ID or restricted text marker | 0 |
+| Raw vector search, p50 / p95 | 0.705 / 1.077 ms |
+| ACL-filtered vector search, p50 / p95 | 1.488 / 1.969 ms |
+| Paired filtering overhead, p50 / p95 | 0.721 / 1.365 ms |
+| Full authenticated and audited search, p50 / p95 | 26.217 / 29.116 ms |
+| Full search minus paired raw search, p50 / p95 | 25.413 / 28.208 ms |
+| Revoke call to first blocked search response, Acme / Globex | 54.358 / 48.770 ms |
+
+The matrix covers eight cases for each persona on both endpoints, plus four
+post-revocation requests. It checks the complete response for restricted text
+and IDs, checks every returned ID pair, and verifies that search still returns
+the expected authorized chunks. A positive control also requires HR to receive
+a salary citation before revocation. Spoofed body fields must produce 422.
+
+Latency uses 100 warmed, alternating pairs on the same query vector and store.
+The filtered path includes the application's vector ACL drift check and filtered
+ranking. Percentiles use nearest rank on individual samples and on pairwise
+differences. SQL allowlist construction, authentication, text hydration, audit,
+generation and HTTP are outside this vector timing. After each pair, the
+runner times a complete authenticated request to `/retrieval/search` through
+the HTTP client, including SQL and audit persistence. Each revocation timing
+includes the SQL commit, Qdrant sync and the next authenticated search. RAG
+is checked immediately afterward. SQLite, local Qdrant and the extractive model
+make the run reproducible offline. Local Qdrant does not exercise server-side
+payload indexes. Use staging measurements to size a deployment.
+
+### Run the demo and evaluation
+
+After installing the project with its dev dependencies, run from the checkout:
+
+```powershell
+python -m scripts.seed_demo
+python -m scripts.run_benchmarks
+python -m scripts.run_benchmarks --format json --samples 100
+pytest -q tests/test_adversarial_leakage.py
+```
+
+Each local command creates its own disposable SQLite database with foreign keys,
+in-memory Qdrant and temporary private uploads. The benchmark seeds its own
+corpus, logs in over HTTP, and runs the application routes. Markdown is the
+default output. A leak or failed positive control gives a nonzero exit code.
+
+### Dedicated Docker Compose staging
+
+Prepare a separate `.env.demo` from `.env.example` with new URL-safe MySQL
+passwords and a random JWT secret. Set the following values in that file and
+use a shell free of conflicting Compose environment overrides.
+
+```dotenv
+APP_ENV=staging
+MYSQL_DATABASE=rag_demo
+QDRANT_COLLECTION_NAME=rag_demo_chunks
+QDRANT_URL=http://qdrant:6333
+EMBEDDING_PROVIDER=local
+LLM_PROVIDER=local
+CHUNK_SIZE=160
+CHUNK_OVERLAP=24
+API_HOST_BIND=127.0.0.1
+API_HOST_PORT=18000
+MYSQL_HOST_PORT=13307
+QDRANT_HOST_PORT=16333
+```
+
+Use a dedicated Compose project so each service gets its own project-scoped
+volume. The one-command startup after configuration is
+`docker compose --env-file .env.demo -p rag-demo up -d --build --wait`.
+For this new staging database, apply the existing migration explicitly and run
+the opt-in tools inside the staging API container:
+
+```powershell
+$demo = @('compose', '--env-file', '.env.demo', '-p', 'rag-demo')
+docker @demo exec api alembic upgrade 20261125_0003
+# Supply a persistent, randomly generated demo-only secret from your secret manager.
+$env:DEMO_PASSWORD_KEY = [System.Net.NetworkCredential]::new('', (Read-Host 'Demo key (32+ characters)' -AsSecureString)).Password
+docker @demo exec -e DEMO_PASSWORD_KEY api python -m scripts.seed_demo --staging-url http://127.0.0.1:8000
+docker @demo exec -e DEMO_PASSWORD_KEY api python -m scripts.run_benchmarks --staging-url http://127.0.0.1:8000
+Remove-Item Env:DEMO_PASSWORD_KEY
+```
+
+The key derives distinct persona passwords. Reuse it on subsequent runs.
+Seeding reuses existing identities, verifies document ownership and chunk text,
+and reapplies the corpus grants. Staging evaluation uses the already seeded
+corpus, writes normal retrieval audits, and temporarily revokes and restores
+the HR salary grant in each tenant. The tools serialize these operations with
+a MySQL advisory lock. If interrupted during revocation, rerun the seed command
+to restore the corpus. Seeding and migrations are explicit operator actions.
+
+## Limitations & Production Roadmap
+
+- PDF extraction runs with the API's filesystem privileges. Isolate the parser
+  in a non-root, network-disabled worker with bounded IPC, resource limits and
+  no database credentials or original-file mount before accepting untrusted PDFs.
+- Upload concurrency is bounded per process. Shared tenant storage quotas and
+  replica-wide admission need transactional reservations, expiry, reconciliation
+  and capacity alerts. Both designs are detailed under capacity planning below.
+- These results cover the specified corpus and access matrix. Production
+  latency, larger tenant allowlists and external generation need separate evaluation.
+
 ## Prerequisites
 
 - Python 3.11 or newer
@@ -60,10 +183,9 @@ fields before commit. A lost commit acknowledgement or HTTP response can still
 leave the caller uncertain whether creation succeeded. Repeating a POST can
 create another metadata record.
 
-The current schema supports role-based document read grants, but it does not
-define which role may administer permissions. This phase therefore intentionally
-does not expose a permission grant or revoke endpoint rather than assuming that
-an arbitrary role, including document ownership, can grant access.
+Trusted operators administer role-based read grants with the maintenance command
+described below. The tenant admin role grants access to audit queries. Document
+reads still require ownership or a role grant.
 
 ## Upload and chunking
 
@@ -106,8 +228,8 @@ Extracted text is limited to one million characters. Chunk windows advance by
 size minus overlap and stop once a window reaches the end. Whitespace-only
 windows are skipped. Before allocation, at most 4096 windows and an 8 MiB upper bound on generated UTF-8 bytes are allowed. The estimate charges four bytes per character, including overlap. Each new
 chunk stores its ordered index, text, SHA-256 of its UTF-8 bytes, and the count
-of whitespace-delimited tokens. The existing required point-ID field reserves
-a UUID for future use. Processing runs entirely in the API and PDF subprocess.
+of whitespace-delimited tokens. A UUID links each SQL chunk to its Qdrant point.
+The API performs extraction, chunking and indexing during the upload request.
 
 | HTTP status | Meaning |
 |---|---|

@@ -8,6 +8,7 @@ ARG EMBEDDING_EXTRAS=""
 RUN pip install --no-cache-dir ".${EMBEDDING_EXTRAS}" && pip check
 COPY alembic ./alembic
 COPY alembic.ini ./
+COPY scripts/demo_runtime.py scripts/seed_demo.py scripts/run_benchmarks.py ./scripts/
 
 RUN install -d -m 0700 /var/lib/rag/uploads
 
